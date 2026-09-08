@@ -1,4 +1,4 @@
-name: Automated PAK Tool Engine
+name: PAK and Lua Tool Engine
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       action_type:
-        description: 'Operation (auto reads data.json)'
+        description: 'Operation to perform'
         required: true
         default: 'auto'
         type: choice
@@ -22,7 +22,7 @@ permissions:
   contents: write
 
 jobs:
-  pak-process:
+  run-engine:
     runs-on: ubuntu-latest
 
     steps:
@@ -31,10 +31,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: ⚙️ Setup QEMU (ARM64 Termux Support)
+      - name: ⚙️ Setup QEMU & ARM64 Binfmt (Termux Binary Support)
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static binfmt-support rustc cargo binutils build-essential
+          docker run --privileged --rm tonistiigi/binfmt --install all
 
       - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
@@ -47,13 +48,35 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 📦 Install All Dependencies
+      - name: 📦 Install Termux Python Dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
           pip install rich colorama termcolor pyfiglet requests pycryptodome zstandard gmalg cryptography
 
-      - name: 🚀 Run Tool & Auto-Manage Folders
+      - name: 🛠️ Link Termux LD_LIBRARY_PATH & Organize Folders
+        run: |
+          # Termux library directory simulate karein
+          sudo mkdir -p /data/data/com.termux/files/usr/lib
+          sudo mkdir -p /data/data/com.termux/files/usr/bin
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/* /data/data/com.termux/files/usr/lib/ 2>/dev/null || true
+          sudo ln -sf /usr/lib/* /data/data/com.termux/files/usr/lib/ 2>/dev/null || true
+          sudo ln -sf /usr/local/lib/* /data/data/com.termux/files/usr/lib/ 2>/dev/null || true
+          sudo ln -sf $(which python3) /data/data/com.termux/files/usr/bin/python
+          sudo ln -sf $(which python3) /data/data/com.termux/files/usr/bin/python3
+
+          # Toxic 4.5 tool ke andar se const aur sm4_variant root me copy karein
+          if [ -d "Toxic 4.5 tool" ]; then
+            echo "Syncing files from 'Toxic 4.5 tool'..."
+            cp -rn "Toxic 4.5 tool/"* . 2>/dev/null || true
+          fi
+
+          # Binaries ko execute permission dein
+          chmod +x *.bin 2>/dev/null || true
+          chmod -R 777 .
+
+      - name: 🚀 Execute Unpack / Repack Engine with Key
         env:
+          LD_LIBRARY_PATH: /data/data/com.termux/files/usr/lib
           INPUT_ACTION_TYPE: ${{ github.event.inputs.action_type || 'auto' }}
         run: |
           python3 - << 'EOF'
@@ -62,149 +85,167 @@ jobs:
           import glob
           import json
           import subprocess
+          import time
 
-          # 1. Structure Folders Auto-Create
-          folders = ['original_pak', 'unpack_folder', 'repack_folder']
-          for folder in folders:
-            os.makedirs(folder, exist_ok=True)
-            keep_file = os.path.join(folder, '.gitkeep')
-            if not os.path.exists(keep_file):
-              with open(keep_file, 'w') as kf:
-                pass
+          # 1. Structure folders ensure karein
+          for d in ['original_pak', 'unpack_folder', 'repack_folder']:
+              os.makedirs(d, exist_ok=True)
+              kf = os.path.join(d, '.gitkeep')
+              if not os.path.exists(kf):
+                  open(kf, 'w').close()
 
-          # 2. data.json Auto-Create if missing
+          # 2. data.json check & parse
           data_file = 'data.json'
           if not os.path.exists(data_file):
-            default_config = {
-              "unpack": True,
-              "repack": False,
-              "pak_name": "game.pak"
-            }
-            with open(data_file, 'w', encoding='utf-8') as df:
-              json.dump(default_config, df, indent=4)
-            print("✨ Created default data.json")
+              default_cfg = {
+                  "unpack": True,
+                  "repack": False,
+                  "key": "HR-RAJPUT",
+                  "pak_name": "game.pak"
+              }
+              with open(data_file, 'w', encoding='utf-8') as f:
+                  json.dump(default_cfg, f, indent=4)
+              config = default_cfg
+          else:
+              with open(data_file, 'r', encoding='utf-8') as f:
+                  config = json.load(f)
 
-          with open(data_file, 'r', encoding='utf-8') as df:
-            config = json.load(df)
-
-          # Manual dispatch check
+          # Manual dispatch handling
           action_env = os.getenv("INPUT_ACTION_TYPE", "auto")
           if action_env == "unpack":
-            config["unpack"] = True
-            config["repack"] = False
+              config["unpack"] = True
+              config["repack"] = False
           elif action_env == "repack":
-            config["unpack"] = False
-            config["repack"] = True
+              config["unpack"] = False
+              config["repack"] = True
 
-          # 3. Locate Tool Binary
-          bin_files = [f for f in os.listdir('.') if 'TOXIC' in f and f.endswith('.bin')]
-          if not bin_files:
-            print("❌ Koi TOXIC .bin file nahi mili!")
-            sys.exit(0)
+          KEY = config.get("key", "HR-RAJPUT")
 
-          tool_bin = None
-          for f in bin_files:
-            if "4.5" in f and "Lua" not in f:
-              tool_bin = f
-              break
-          if not tool_bin:
-            tool_bin = bin_files[0]
+          # 3. Binaries locate karein
+          all_files = os.listdir('.')
+          main_bin = None
+          lua_bin = None
 
-          print(f"🔧 Found Tool Binary: {tool_bin}")
-          os.chmod(tool_bin, 0o777)
+          for f in all_files:
+              if f.endswith('.bin') and 'TOXIC' in f:
+                  if 'Lua' in f or 'LUA' in f:
+                      lua_bin = f
+                  else:
+                      main_bin = f
 
-          def execute_tool(input_data):
-            is_elf = False
-            try:
-              with open(tool_bin, 'rb') as tf:
-                if tf.read(4) == b'\x7fELF':
-                  is_elf = True
-            except Exception:
-              pass
+          print(f"🔑 License Key: {KEY}")
+          print(f"📦 Main Binary: {main_bin}")
+          print(f"📜 Lua Binary:  {lua_bin}")
 
-            cmd = [f"./{tool_bin}"] if is_elf else [sys.executable, tool_bin]
-            print(f"Running: {' '.join(cmd)}")
-            try:
-              proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-              )
-              out, _ = proc.communicate(input=input_data, timeout=1200)
-              print(out)
-            except Exception as e:
-              print(f"Error executing directly: {e}, trying fallback via Python...")
-              proc = subprocess.Popen(
-                [sys.executable, tool_bin],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-              )
-              out, _ = proc.communicate(input=input_data, timeout=1200)
-              print(out)
+          if not main_bin and not lua_bin:
+              print("❌ Koi TOXIC .bin file nahi mili!")
+              sys.exit(1)
 
-          # 4. Handle Unpack Mode
+          def run_binary(bin_name, inputs_list):
+              if not bin_name or not os.path.exists(bin_name):
+                  return
+              os.chmod(bin_name, 0o777)
+              cmd = [f"./{bin_name}"]
+              input_str = "\n".join(inputs_list) + "\n\n"
+              
+              env = os.environ.copy()
+              env["LD_LIBRARY_PATH"] = f"/data/data/com.termux/files/usr/lib:{env.get('LD_LIBRARY_PATH', '')}"
+
+              print(f"\n▶️ Running: {bin_name}")
+              try:
+                  proc = subprocess.Popen(
+                      cmd,
+                      stdin=subprocess.PIPE,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT,
+                      text=True,
+                      env=env
+                  )
+                  stdout, _ = proc.communicate(input=input_str, timeout=900)
+                  print(stdout)
+              except Exception as e:
+                  print(f"⚠️ Direct ELF execution fallback to python ({e}):")
+                  proc = subprocess.Popen(
+                      [sys.executable, bin_name],
+                      stdin=subprocess.PIPE,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT,
+                      text=True,
+                      env=env
+                  )
+                  stdout, _ = proc.communicate(input=input_str, timeout=900)
+                  print(stdout)
+
+          # 4. Unpack Process
           if config.get("unpack"):
-            print("\n======================================")
-            print("🚀 OPERATION: UNPACK")
-            print("======================================")
-            paks = glob.glob("original_pak/*.pak") + glob.glob("original_pak/*.PAK")
-            if not paks:
-              print("⚠️ 'original_pak/' me koi .pak file nahi hai. Apni .pak file upload karein.")
-              readme_file = os.path.join("original_pak", "README.md")
-              if not os.path.exists(readme_file):
-                with open(readme_file, "w") as rf:
-                  rf.write("Yahan original .pak file dalein.\n")
-            else:
-              target_pak = paks[0]
-              print(f"🎯 Target PAK: {target_pak}")
-              # Inputs: [Option 1 for unpack] -> [Pak path] -> [Output dir]
-              inputs = f"1\n{target_pak}\nunpack_folder\n\n\n"
-              execute_tool(inputs)
-              print("✅ Unpack execution complete.")
+              print("\n==========================================")
+              print("🚀 STARTING UNPACK PROCESS")
+              print("==========================================")
+              
+              paks = glob.glob("original_pak/*.pak") + glob.glob("original_pak/*.PAK")
+              if not paks:
+                  print("⚠️ 'original_pak/' folder me koi .pak file nahi hai! Kripya .pak file upload karein.")
+              else:
+                  target_pak = paks[0]
+                  print(f"🎯 Selected PAK: {target_pak}")
+                  
+                  # 1st: Main Tool unpack run karega (Key -> Option 1 -> Target Pak -> unpack_folder)
+                  if main_bin:
+                      print("🔹 Running Main PAK Tool...")
+                      run_binary(main_bin, [KEY, "1", target_pak, "unpack_folder"])
 
-          # 5. Handle Repack Mode
+                  # 2nd: Lua Tool decrypt karega
+                  if lua_bin:
+                      print("🔹 Running Lua Tool on unpacked assets...")
+                      run_binary(lua_bin, [KEY, "1", "unpack_folder"])
+
+                  print("✅ Unpack successfully completed!")
+
+          # 5. Repack Process
           elif config.get("repack"):
-            print("\n======================================")
-            print("🚀 OPERATION: REPACK")
-            print("======================================")
-            output_name = config.get("pak_name", "repacked_game.pak")
-            if not output_name.endswith(".pak"):
-              output_name += ".pak"
-            output_pak = os.path.join("repack_folder", output_name)
-            print(f"🎯 Output Target: {output_pak}")
-            # Inputs: [Option 2 for repack] -> [Input dir] -> [Output pak path]
-            inputs = f"2\nunpack_folder\n{output_pak}\n\n\n"
-            execute_tool(inputs)
-            print("✅ Repack execution complete.")
+              print("\n==========================================")
+              print("🚀 STARTING REPACK PROCESS")
+              print("==========================================")
+              
+              output_name = config.get("pak_name", "game.pak")
+              if not output_name.endswith(".pak"):
+                  output_name += ".pak"
+              output_pak = os.path.join("repack_folder", output_name)
 
-          else:
-            print("ℹ️ data.json me unpack aur repack dono false hain.")
+              # 1st: Lua Tool encrypt/build karega
+              if lua_bin:
+                  print("🔹 Encrypting Lua assets...")
+                  run_binary(lua_bin, [KEY, "2", "unpack_folder"])
+
+              # 2nd: Main Tool repack karega nayi PAK me (Key -> Option 2 -> unpack_folder -> output_pak)
+              if main_bin:
+                  print(f"🔹 Building PAK: {output_pak}...")
+                  run_binary(main_bin, [KEY, "2", "unpack_folder", output_pak])
+
+              print("✅ Repack successfully completed!")
           EOF
 
-      - name: 📤 Upload Output as Artifact
+      - name: 📤 Upload Processed PAK & Folders as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: processed-pak-files
+          name: pak-output
           path: |
             unpack_folder/
             repack_folder/
           retention-days: 7
 
-      - name: 💾 Auto Push Folders & Results to GitHub Repo
+      - name: 💾 Commit & Auto Push Changes to GitHub
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
+          # Root ke folder updates aur outputs add karein
           git add data.json original_pak/ unpack_folder/ repack_folder/
           
           if git diff --staged --quiet; then
-            echo "Koi nayi files ya changes nahi hain commit karne ke liye."
+            echo "Koi naya badlaav nahi hai commit karne ke liye."
           else
-            git commit -m "Auto: Update PAK structure and files [skip ci]"
+            git commit -m "Auto: Update PAK extracted/repacked data [skip ci]"
             git pull --rebase origin ${{ github.ref_name }} || true
             git push origin HEAD:${{ github.ref_name }}
           fi
